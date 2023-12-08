@@ -16,7 +16,6 @@ import addonHandler
 from addonHandler import Addon, getAvailableAddons, _availableAddons, state, AddonStateCategory
 import globalPluginHandler
 import gui
-import os
 
 # addonHandler.installAddonBundle function modified to resolve #14041
 def installAddonBundle(bundle: "AddonBundle") -> "Addon":
@@ -53,11 +52,8 @@ def installAddonBundle(bundle: "AddonBundle") -> "Addon":
 
 # Function to add to addonHandler
 def displayAddonChangelog(addon, changelogFileName="changelog.txt"):
-	path = os.path.join(
-		os.path.split(
-		addon.getDocFilePath())[0],
-		changelogFileName)
-	if not os.path.exists(path): return False
+	path = addon.getDocFilePath(fileName=changelogFileName)
+	if not path: return False
 	title = _("Whats new in {addonSummary} {addonVersion}").format(
 		addonSummary = addon.manifest["summary"],
 		addonVersion = addon.version
