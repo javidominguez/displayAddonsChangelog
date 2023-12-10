@@ -11,62 +11,155 @@ See the file COPYING.txt for more details.
 Copyright (C) 2023 Javi Dominguez <fjavids@gmail.com>
 """
 
-from logHandler import log
 import addonHandler
-from addonHandler import Addon, getAvailableAddons, _availableAddons, state, AddonStateCategory
+from addonHandler import Addon
 import globalPluginHandler
+import systemUtils
 import gui
-
-# addonHandler.installAddonBundle function modified to resolve #14041
-def installAddonBundle(bundle: "AddonBundle") -> "Addon":
-	""" Extracts an Addon bundle in to a unique subdirectory of the user addons directory,
-	marking the addon as needing 'install completion' on NVDA restart.
-	"""
-	bundle.extract()
-	addon = Addon(bundle.pendingInstallPath)
-	# #2715: The add-on must be added to _availableAddons here so that
-	# translations can be used in installTasks module.
-	_availableAddons[addon.path]=addon
-	# start of modifications for #14041
-	try:
-		installedAddon = next(getAvailableAddons(filterFunc=lambda a: a.name == addon.name))
-	except StopIteration:
-		# An addon with the same name as the one being installed is not installed.
-		pass
-	else:
-		if addon.version !=installedAddon.version:
-			# There is a different version of the addon being installed, therefore, since it is an update, the changelog is displayed.
-			# It would be better to check that the new version is greater than the installed one but perhaps the version numbering formats are too variable to do this reliably.
-			displayAddonChangelog(addon)
-	# End of modifications
-	try:
-		addon.runInstallTask("onInstall")
-	except:
-		log.error("task 'onInstall' on addon '%s' failed"%addon.name,exc_info=True)
-		del _availableAddons[addon.path]
-		addon.completeRemove(runUninstallTask=False)
-		raise AddonError("Installation failed")
-	state[AddonStateCategory.PENDING_INSTALL].add(bundle.manifest['name'])
-	state.save()
-	return addon
-
-# Function to add to addonHandler
-def displayAddonChangelog(addon, changelogFileName="changelog.txt"):
-	path = addon.getDocFilePath(fileName=changelogFileName)
-	if not path: return False
-	title = _("Whats new in {addonSummary} {addonVersion}").format(
-		addonSummary = addon.manifest["summary"],
-		addonVersion = addon.version
-	)
-	with open(path, "r", encoding="utf-8") as f:
-		body = f.read()
-	gui.messageBox(body, title)
-	return True
-
+import wx
+import zipfile
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 	def __init__(self, *args, **kwargs):
 		super(GlobalPlugin, self).__init__(*args, **kwargs)
-		setattr(addonHandler, "displayAddonChangelog", displayAddonChangelog)
-		setattr(addonHandler, "installAddonBundle", installAddonBundle)
+		setattr(gui.addonGui, "installAddon", installAddon)
+
+# #14041 gui.addonGui.installAddon function to display a changelog in the ialog asking if the user wishes to update a previously installed addon.
+def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
+	""" Installs the addon bundle at path.
+	Only used for installing external add-on bundles.
+	Any error messages / warnings are presented to the user via a GUI message box.
+	If attempting to install an addon that is pending removal, it will no longer be pending removal.
+	@return True on success or False on failure.
+	@note See also L{addonStore.install.installAddon}
+	"""
+	from gui.addonStoreGui.controls.messageDialogs import (
+		_showAddonRequiresNVDAUpdateDialog,
+		_showConfirmAddonInstallDialog,
+		_shouldInstallWhenAddonTooOldDialog,
+	)
+	try:
+		bundle = addonHandler.AddonBundle(addonPath)
+	except:
+		log.error("Error opening addon bundle from %s" % addonPath, exc_info=True)
+		gui.messageBox(
+			# Translators: The message displayed when an error occurs when opening an add-on package for adding.
+			_("Failed to open add-on package file at %s - missing file or invalid file format") % addonPath,
+			# Translators: The title of a dialog presented when an error occurs.
+			_("Error"),
+			wx.OK | wx.ICON_ERROR
+		)
+		return False  # Exit early, can't install an invalid bundle
+
+	if not bundle._hasGotRequiredSupport:
+		_showAddonRequiresNVDAUpdateDialog(parentWindow, bundle._addonGuiModel)
+		return False  # Exit early, addon does not have required support
+	elif bundle.canOverrideCompatibility:
+		if _shouldInstallWhenAddonTooOldDialog(parentWindow, bundle._addonGuiModel):
+			# Install incompatible version
+			bundle.enableCompatibilityOverride()
+		else:
+			# Exit early, addon is not up to date with the latest API version.
+			return False
+	elif wx.YES != _showConfirmAddonInstallDialog(parentWindow, bundle._addonGuiModel):
+		return False  # Exit early, User changed their mind about installation.
+
+	from addonStore.install import _getPreviouslyInstalledAddonById
+	prevAddon = _getPreviouslyInstalledAddonById(bundle)
+	if prevAddon:
+		summary=bundle.manifest["summary"]
+		curVersion=prevAddon.manifest["version"]
+		newVersion=bundle.manifest["version"]
+
+		# Translators: A title for the dialog asking if the user wishes to update a previously installed
+		# add-on with this one.
+		messageBoxTitle = _("Add-on Installation")
+
+		overwriteExistingAddonInstallationMessage = _(
+			# Translators: A message asking if the user wishes to update an add-on with the same version
+			# currently installed according to the version number.
+			"You are about to install version {newVersion} of {summary},"
+			" which appears to be already installed. "
+			"Would you still like to update?"
+		).format(summary=summary, newVersion=newVersion)
+
+		updateAddonInstallationMessage = _(
+			# Translators: A message asking if the user wishes to update a previously installed
+			# add-on with this one.
+			"A version of this add-on is already installed. "
+			"Would you like to update {summary} version {curVersion} to version {newVersion}?"
+		).format(summary=summary, curVersion=curVersion, newVersion=newVersion)
+# Start of #14041 modifications:
+		# Extract only the manifest and the documentation from the bundle.
+		with zipfile.ZipFile(bundle._path, 'r') as z:
+			for info in z.infolist():
+				if info.filename.lower().startswith("doc/") or info.filename.lower() == "manifest.ini":
+					z.extract(info, bundle.pendingInstallPath)
+		docAddon = Addon(bundle.pendingInstallPath)
+		changelogPath = docAddon.getDocFilePath(fileName="changelog.txt")
+		# If the documentation includes a changelog.txt file:
+		if changelogPath:
+			with open(changelogPath, "r", encoding="utf-8") as f:
+				changelogText = f.read()
+			# Add the contents of the changelog.txt file to the confirmation dialog message.
+			updateAddonInstallationMessage = "\n".join((
+				updateAddonInstallationMessage,
+				#Translators: Displayed in the update addon installation message when a changelog is included.
+				_("\nWhats new in {version}:").format(version=bundle.manifest["version"]),
+				changelogText
+			))
+
+		if gui.messageBox(
+			overwriteExistingAddonInstallationMessage if curVersion == newVersion else updateAddonInstallationMessage,
+			messageBoxTitle,
+			wx.YES|wx.NO|wx.ICON_WARNING
+		) != wx.YES:
+			docAddon.completeRemove(runUninstallTask=False)
+			return False
+# End of #14041 modifications
+
+	from contextlib import contextmanager
+
+	@contextmanager
+	def doneAndDestroy(window):
+		try:
+			yield window
+		except:
+			# pass on any exceptions
+			raise
+		finally:
+			# but ensure that done and Destroy are called.
+			window.done()
+			window.Destroy()
+
+	#  use a progress dialog so users know that something is happening.
+	progressDialog = gui.IndeterminateProgressDialog(
+		parentWindow,
+		# Translators: The title of the dialog presented while an Addon is being installed.
+		_("Installing Add-on"),
+		# Translators: The message displayed while an addon is being installed.
+		_("Please wait while the add-on is being installed.")
+	)
+
+	try:
+		# Use context manager to ensure that `done` and `Destroy` are called on the progress dialog afterwards
+		with doneAndDestroy(progressDialog):
+			systemUtils.ExecAndPump(addonHandler.installAddonBundle, bundle)
+			if prevAddon:
+				from addonStore.dataManager import addonDataManager
+				assert addonDataManager
+				# External install should remove cached add-on
+				addonDataManager._deleteCacheInstalledAddon(prevAddon.name)
+				prevAddon.requestRemove()
+			return True
+	except:
+		log.error("Error installing  addon bundle from %s" % addonPath, exc_info=True)
+		gui.messageBox(
+			# Translators: The message displayed when an error occurs when installing an add-on package.
+			_("Failed to install add-on from %s") % addonPath,
+			# Translators: The title of a dialog presented when an error occurs.
+			_("Error"),
+			wx.OK | wx.ICON_ERROR
+		)
+	return False

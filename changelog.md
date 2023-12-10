@@ -1,0 +1,2 @@
+Now the changelog is displayed in the ialog asking if the user wishes to update a previously installed addon. This way the user can read it before deciding whether to install it or not.
+This is only supported by NVDA 2024.1 and later.
