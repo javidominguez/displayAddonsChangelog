@@ -14,9 +14,11 @@ Copyright (C) 2023 Javi Dominguez <fjavids@gmail.com>
 import addonHandler
 from addonHandler import Addon
 import globalPluginHandler
+import os
 import systemUtils
 import gui
 import wx
+import winKernel
 import zipfile
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
@@ -90,15 +92,19 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 			"A version of this add-on is already installed. "
 			"Would you like to update {summary} version {curVersion} to version {newVersion}?"
 		).format(summary=summary, curVersion=curVersion, newVersion=newVersion)
-# Start of #14041 modifications:
-		# Extract only the manifest and the documentation from the bundle.
+# Start of modifications for #14041:
+		# Extract only the manifest and changelog files from the bundle.
 		with zipfile.ZipFile(bundle._path, 'r') as z:
 			for info in z.infolist():
-				if info.filename.lower().startswith("doc/") or info.filename.lower() == "manifest.ini":
+				if isinstance(info.filename, bytes):
+					# #2505: Handle non-Unicode file names.
+					info.filename = info.filename.decode("cp%d" % winKernel.kernel32.GetOEMCP())
+				filename = os.path.split(info.filename.lower())[1]
+				if filename == "changelog.txt" or filename == "manifest.ini":
 					z.extract(info, bundle.pendingInstallPath)
+		# If the documentation includes a changelog.txt file:
 		docAddon = Addon(bundle.pendingInstallPath)
 		changelogPath = docAddon.getDocFilePath(fileName="changelog.txt")
-		# If the documentation includes a changelog.txt file:
 		if changelogPath:
 			with open(changelogPath, "r", encoding="utf-8") as f:
 				changelogText = f.read()
