@@ -25,7 +25,7 @@ addon_info = {
 	# Translators: Long description to be shown for this add-on on add-on information from add-ons manager
 	"addon_description": _("""If the developer of an addon has included a changelog.txt file, its contents will be displayed during installation if you are upgrading from a previous version."""),
 	# version
-	"addon_version": "2024.1.1",
+	"addon_version": "2024.1.2",
 	# Author(s)
 	"addon_author": "Javi Dominguez <fjavids@gmail.com>",
 	# URL for the add-on documentation support

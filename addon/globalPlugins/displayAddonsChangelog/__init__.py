@@ -14,6 +14,7 @@ Copyright (C) 2023 Javi Dominguez <fjavids@gmail.com>
 import addonHandler
 from addonHandler import Addon
 import globalPluginHandler
+from logHandler import log
 import os
 import systemUtils
 import gui
@@ -29,7 +30,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 # #14041 gui.addonGui.installAddon function to display a changelog in the ialog asking if the user wishes to update a previously installed addon.
 def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
-	""" Installs the addon bundle at path.
+	"""Installs the addon bundle at path.
 	Only used for installing external add-on bundles.
 	Any error messages / warnings are presented to the user via a GUI message box.
 	If attempting to install an addon that is pending removal, it will no longer be pending removal.
@@ -41,16 +42,17 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 		_showConfirmAddonInstallDialog,
 		_shouldInstallWhenAddonTooOldDialog,
 	)
+
 	try:
 		bundle = addonHandler.AddonBundle(addonPath)
-	except:
+	except:  # noqa: E722
 		log.error("Error opening addon bundle from %s" % addonPath, exc_info=True)
 		gui.messageBox(
 			# Translators: The message displayed when an error occurs when opening an add-on package for adding.
 			_("Failed to open add-on package file at %s - missing file or invalid file format") % addonPath,
 			# Translators: The title of a dialog presented when an error occurs.
 			_("Error"),
-			wx.OK | wx.ICON_ERROR
+			wx.OK | wx.ICON_ERROR,
 		)
 		return False  # Exit early, can't install an invalid bundle
 
@@ -58,7 +60,11 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 		_showAddonRequiresNVDAUpdateDialog(parentWindow, bundle._addonGuiModel)
 		return False  # Exit early, addon does not have required support
 	elif bundle.canOverrideCompatibility:
-		if _shouldInstallWhenAddonTooOldDialog(parentWindow, bundle._addonGuiModel):
+		shouldInstall, rememberChoice = _shouldInstallWhenAddonTooOldDialog(
+			parentWindow,
+			bundle._addonGuiModel,
+		)
+		if shouldInstall:
 			# Install incompatible version
 			bundle.enableCompatibilityOverride()
 		else:
@@ -68,11 +74,12 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 		return False  # Exit early, User changed their mind about installation.
 
 	from addonStore.install import _getPreviouslyInstalledAddonById
+
 	prevAddon = _getPreviouslyInstalledAddonById(bundle)
 	if prevAddon:
-		summary=bundle.manifest["summary"]
-		curVersion=prevAddon.manifest["version"]
-		newVersion=bundle.manifest["version"]
+		summary = bundle.manifest["summary"]
+		curVersion = prevAddon.manifest["version"]
+		newVersion = bundle.manifest["version"]
 
 		# Translators: A title for the dialog asking if the user wishes to update a previously installed
 		# add-on with this one.
@@ -83,15 +90,16 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 			# currently installed according to the version number.
 			"You are about to install version {newVersion} of {summary},"
 			" which appears to be already installed. "
-			"Would you still like to update?"
+			"Would you still like to update?",
 		).format(summary=summary, newVersion=newVersion)
 
 		updateAddonInstallationMessage = _(
 			# Translators: A message asking if the user wishes to update a previously installed
 			# add-on with this one.
 			"A version of this add-on is already installed. "
-			"Would you like to update {summary} version {curVersion} to version {newVersion}?"
+			"Would you like to update {summary} version {curVersion} to version {newVersion}?",
 		).format(summary=summary, curVersion=curVersion, newVersion=newVersion)
+
 # Start of modifications for #14041:
 		# Extract only the manifest and changelog files from the bundle.
 		with zipfile.ZipFile(bundle._path, 'r') as z:
@@ -116,56 +124,18 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 				changelogText
 			))
 
-		if gui.messageBox(
-			overwriteExistingAddonInstallationMessage if curVersion == newVersion else updateAddonInstallationMessage,
-			messageBoxTitle,
-			wx.YES|wx.NO|wx.ICON_WARNING
-		) != wx.YES:
+		if (
+			gui.messageBox(
+				overwriteExistingAddonInstallationMessage
+				if curVersion == newVersion
+				else updateAddonInstallationMessage,
+				messageBoxTitle,
+				wx.YES | wx.NO | wx.ICON_WARNING,
+			)
+			!= wx.YES
+		):
 			docAddon.completeRemove(runUninstallTask=False)
 			return False
 # End of #14041 modifications
 
-	from contextlib import contextmanager
-
-	@contextmanager
-	def doneAndDestroy(window):
-		try:
-			yield window
-		except:
-			# pass on any exceptions
-			raise
-		finally:
-			# but ensure that done and Destroy are called.
-			window.done()
-			window.Destroy()
-
-	#  use a progress dialog so users know that something is happening.
-	progressDialog = gui.IndeterminateProgressDialog(
-		parentWindow,
-		# Translators: The title of the dialog presented while an Addon is being installed.
-		_("Installing Add-on"),
-		# Translators: The message displayed while an addon is being installed.
-		_("Please wait while the add-on is being installed.")
-	)
-
-	try:
-		# Use context manager to ensure that `done` and `Destroy` are called on the progress dialog afterwards
-		with doneAndDestroy(progressDialog):
-			systemUtils.ExecAndPump(addonHandler.installAddonBundle, bundle)
-			if prevAddon:
-				from addonStore.dataManager import addonDataManager
-				assert addonDataManager
-				# External install should remove cached add-on
-				addonDataManager._deleteCacheInstalledAddon(prevAddon.name)
-				prevAddon.requestRemove()
-			return True
-	except:
-		log.error("Error installing  addon bundle from %s" % addonPath, exc_info=True)
-		gui.messageBox(
-			# Translators: The message displayed when an error occurs when installing an add-on package.
-			_("Failed to install add-on from %s") % addonPath,
-			# Translators: The title of a dialog presented when an error occurs.
-			_("Error"),
-			wx.OK | wx.ICON_ERROR
-		)
-	return False
+	return gui.addonGui._performExternalAddonBundleInstall(parentWindow, bundle, prevAddon)
